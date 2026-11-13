@@ -466,25 +466,91 @@
   };
 
   const STORAGE_KEY = "docaria_estoque_caixa_v1";
+  const TS_KEY = STORAGE_KEY + "_ts";
 
   // ===== ESTADO =====
   let state = { stock: [], sales: [], withdrawals: [] };
   let cart = []; // [{id, qty}]
+  let localTs = 0;
 
   const fmt = new Intl.NumberFormat("pt-BR", { style:"currency", currency:"BRL" });
   const din = (v) => fmt.format(v || 0);
 
+  // ===== FIREBASE (backup na nuvem — opcional, sem travar o app) =====
+  const firebaseConfig = {
+    apiKey: "AIzaSyCpxqQc6VIriaBIFCJ3ugAbuerojP3kOKc",
+    authDomain: "carolinasistemas.firebaseapp.com",
+    projectId: "carolinasistemas",
+    storageBucket: "carolinasistemas.firebasestorage.app",
+    messagingSenderId: "927751418116",
+    appId: "1:927751418116:web:b07ec5f5f5cfe46dfb2051",
+    measurementId: "G-DCK7J8W1H4"
+  };
+  let db = null, fbDoc = null, fbGetDoc = null, fbSetDoc = null;
+
   function loadState(){
     try{
       const raw = localStorage.getItem(STORAGE_KEY);
+      localTs = parseInt(localStorage.getItem(TS_KEY)||"0",10) || 0;
       if(raw){
         const p = JSON.parse(raw);
         state = Object.assign({ stock: [], sales: [], withdrawals: [] }, p);
       }
     }catch(e){ /* dados corrompidos: recomeça vazio */ }
   }
+
   function saveState(){
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+    try{
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      localTs = Date.now();
+      localStorage.setItem(TS_KEY, String(localTs));
+    }catch(e){}
+    syncToCloud();
+  }
+
+  async function initFirebase(){
+    try{
+      const appMod = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+      const fsMod = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+      const app = appMod.initializeApp(firebaseConfig);
+      db = fsMod.getFirestore(app);
+      fbDoc = fsMod.doc; fbGetDoc = fsMod.getDoc; fbSetDoc = fsMod.setDoc;
+      try{ await fsMod.enableIndexedDbPersistence(db); }catch(e){}
+      await carregarDaNuvem();
+    }catch(e){ db = null; /* offline: segue só com dados locais */ }
+  }
+
+  async function syncToCloud(){
+    if(!db) return;
+    try{
+      await fbSetDoc(fbDoc(db, "docaria", "estado"), {
+        stock: state.stock, sales: state.sales, withdrawals: state.withdrawals,
+        atualizado: Date.now()
+      }, { merge: true });
+    }catch(e){ /* sem conexão: mantém salvo localmente */ }
+  }
+
+  async function carregarDaNuvem(){
+    if(!db) return;
+    try{
+      const snap = await fbGetDoc(fbDoc(db, "docaria", "estado"));
+      if(!snap.exists()){ await syncToCloud(); return; }
+      const d = snap.data();
+      const cloudTs = d.atualizado || 0;
+      if(cloudTs > localTs){
+        state.stock = Array.isArray(d.stock) ? d.stock : [];
+        state.sales = Array.isArray(d.sales) ? d.sales : [];
+        state.withdrawals = Array.isArray(d.withdrawals) ? d.withdrawals : [];
+        try{
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+          localStorage.setItem(TS_KEY, String(cloudTs));
+          localTs = cloudTs;
+        }catch(e){}
+        renderAll();
+      } else if(localTs > cloudTs){
+        await syncToCloud();
+      }
+    }catch(e){}
   }
 
   function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
@@ -1009,6 +1075,7 @@
   bind();
   $("inVenc").min = hojeStr();
   renderAll();
+  initFirebase();
 })();
 </script>
 </body>
